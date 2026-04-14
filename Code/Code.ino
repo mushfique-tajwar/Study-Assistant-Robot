@@ -12,7 +12,7 @@ const int BLUE_LED  = 11;
 const int SERVO_PIN = 6;
 
 // --- Thresholds & Timers ---
-const int DIST_THRESHOLD = 30;         
+const int DIST_THRESHOLD = 30;          
 const int AWAY_THRESHOLD = 80;         // User is considered "gone" if > 80cm
 const int LIGHT_THRESHOLD = 400;       
 const unsigned long BREAK_INTERVAL = 30000; 
@@ -50,7 +50,6 @@ void loop() {
   }
 
   // 2. DEPARTURE CHECK (The 10-Read Logic)
-  // If distance is > 80cm OR sensor times out (-1), user is likely gone
   if (distance > AWAY_THRESHOLD || distance == -1) {
     departureCounter++;
   } else {
@@ -58,7 +57,6 @@ void loop() {
   }
 
   // 3. MAIN LOGIC CONTROLLER
-  // System stays awake if PIR recently saw motion AND departure counter is low
   if ((millis() - lastMotionDetectedTime < STAY_AWAKE_TIMEOUT) && (departureCounter < 10)) {
     
     if (studyStartTime == 0) {
@@ -84,12 +82,25 @@ void loop() {
     // SYSTEM RESET (User left or 10 consecutive absent reads)
     if (studyStartTime != 0) {
       Serial.print("--- Resetting: ");
-      if (departureCounter >= 10) Serial.println("User confirmed GONE by Distance Sensor ---");
-      else Serial.println("Timeout: No motion for 5 mins ---");
+      
+      // Check if reset was caused specifically by the distance sensor confirmation
+      if (departureCounter >= 10) {
+        Serial.println("User confirmed GONE by Distance Sensor ---");
+        
+        // --- NEW: Flash Orange 3 Times ---
+        for (int i = 0; i < 3; i++) {
+          setLED(255, 60, 0); // Orange mix (R:255, G:60, B:0)
+          delay(300);
+          setLED(0, 0, 0);    // Off
+          delay(300);
+        }
+      } else {
+        Serial.println("Timeout: No motion for 5 mins ---");
+      }
     }
     
     studyStartTime = 0; 
-    departureCounter = 0; // Reset counter for next time
+    departureCounter = 0; 
     setLED(0, 0, 0); 
     digitalWrite(BUZZER, LOW);
   }
@@ -168,7 +179,7 @@ void debugToSerial(long dist, bool pir) {
   Serial.print("cm | Session: "); 
   Serial.print(elapsed);
   Serial.print("s | Absence Count: "); 
-  Serial.print(departureCounter); // Changed println to print
+  Serial.print(departureCounter); 
   Serial.print(" | PIR_RAW: "); 
-  Serial.println(pir ? "1 (MOV)" : "0 (---)"); // println goes at the very end
+  Serial.println(pir ? "1 (MOV)" : "0 (---)"); 
 }
