@@ -1,185 +1,155 @@
 #include <Servo.h>
 
 // --- Pin Definitions ---
-const int TRIG_PIN  = 9;
-const int ECHO_PIN  = 10;
-const int PIR_PIN   = 2;
-const int LDR_PIN   = A0;
-const int BUZZER    = 4; 
-const int RED_LED   = 3;
-const int GREEN_LED = 5;
-const int BLUE_LED  = 11;
+const int TRIG_1 = 9;  const int ECHO_1 = 10; // Upper (Posture)
+const int TRIG_2 = 7;  const int ECHO_2 = 8;  // Lower (Presence)
+const int PIR_PIN = 2;
+const int LDR_PIN = A0;
+const int BUZZER  = 4;
+const int RED_LED = 3; const int GREEN_LED = 5; const int BLUE_LED = 11;
 const int SERVO_PIN = 6;
 
-// --- Thresholds & Timers ---
-const int DIST_THRESHOLD = 30;          
-const int AWAY_THRESHOLD = 80;         // User is considered "gone" if > 80cm
-const int LIGHT_THRESHOLD = 400;       
-const unsigned long BREAK_INTERVAL = 30000; 
+// --- Thresholds ---
+const int POSTURE_THRESHOLD = 30; // Slouching if < 30cm
+const int PRESENT_THRESHOLD = 70; // User present if Lower sensor < 70cm
+const int LIGHT_THRESHOLD = 400; // Ambient light threshold (0-1023)
+const unsigned long BREAK_INTERVAL = 2700000; 
 const unsigned long STAY_AWAKE_TIMEOUT = 300000; 
 
 // --- Global Variables ---
 Servo headServo;
 unsigned long studyStartTime = 0;       
 unsigned long lastMotionDetectedTime = 0; 
-int departureCounter = 0;              // Counter for consecutive "absent" reads
+bool userInChair = false;
+int departureCounter = 0;
 
 void setup() {
-  pinMode(TRIG_PIN, OUTPUT);
-  pinMode(ECHO_PIN, INPUT);
+  pinMode(TRIG_1, OUTPUT); pinMode(ECHO_1, INPUT);
+  pinMode(TRIG_2, OUTPUT); pinMode(ECHO_2, INPUT);
   pinMode(PIR_PIN, INPUT);
   pinMode(BUZZER, OUTPUT);
-  pinMode(RED_LED, OUTPUT);
-  pinMode(GREEN_LED, OUTPUT);
-  pinMode(BLUE_LED, OUTPUT);
+  pinMode(RED_LED, OUTPUT); pinMode(GREEN_LED, OUTPUT); pinMode(BLUE_LED, OUTPUT);
   
   headServo.attach(SERVO_PIN);
   headServo.write(90); 
-  
   Serial.begin(9600);
-  Serial.println("System Initialized with Departure Detection...");
+  Serial.println("DUAL-SENSOR SYSTEM START");
 }
 
 void loop() {
-  bool motion = digitalRead(PIR_PIN);
-  long distance = getAveragedDistance();
+  // 1. READ SENSORS
+  bool pirMotion = digitalRead(PIR_PIN);
+  long distUpper = getDistance(TRIG_1, ECHO_1);
+  long distLower = getDistance(TRIG_2, ECHO_2);
 
-  // 1. UPDATE PRESENCE TIMER
-  if (motion == HIGH) {
+  // 2. PIR TRACKING
+  if (pirMotion == HIGH) {
     lastMotionDetectedTime = millis();
   }
 
-  // 2. DEPARTURE CHECK (The 10-Read Logic)
-  if (distance > AWAY_THRESHOLD || distance == -1) {
-    departureCounter++;
+  // 3. PHYSICAL PRESENCE (LOWER SENSOR)
+  // We check if the lower sensor sees an object within range
+  userInChair = (distLower > 0 && distLower < PRESENT_THRESHOLD);
+
+  // 4. DEPARTURE LOGIC (The "Fix")
+  // The user is only "Gone" if PIR is silent AND the distance sensor sees an empty chair
+  bool pirTimedOut = (millis() - lastMotionDetectedTime > STAY_AWAKE_TIMEOUT);
+  
+  if (pirTimedOut && !userInChair) {
+    departureCounter++; // Increment only if BOTH sensors agree you are gone
   } else {
-    departureCounter = 0; // Reset counter if we see the user even once
+    departureCounter = 0; // Reset if either sensor sees you
   }
 
-  // 3. MAIN LOGIC CONTROLLER
-  if ((millis() - lastMotionDetectedTime < STAY_AWAKE_TIMEOUT) && (departureCounter < 10)) {
-    
+  // 5. SYSTEM STATE MACHINE
+  if (departureCounter < 10) {
+    // --- USER IS PRESENT ---
     if (studyStartTime == 0) {
       studyStartTime = millis();
-      Serial.println("--- Session Started ---");
+      Serial.println(">>> SESSION STARTED <<<");
     }
-
-    // Posture Guard
-    if (distance < DIST_THRESHOLD && distance > 0) {
+    
+    // Posture Guard (Upper Sensor)
+    if (distUpper < POSTURE_THRESHOLD && distUpper > 0) {
       handlePostureAlert();
     } else {
-      handleEnvironmentLogic();
+      handleEnvironmentLogic(); // Checks light and handles sound/LED
     }
 
-    // Pomodoro Timer
+    // Pomodoro Check
     if (millis() - studyStartTime > BREAK_INTERVAL) {
       handleBreakAlert();
     }
 
-    debugToSerial(distance, motion);
-
   } else {
-    // SYSTEM RESET (User left or 10 consecutive absent reads)
+    // --- USER IS NOT PRESENT (SYSTEM SLEEP) ---
     if (studyStartTime != 0) {
-      Serial.print("--- Resetting: ");
-      
-      // Check if reset was caused specifically by the distance sensor confirmation
-      if (departureCounter >= 10) {
-        Serial.println("User confirmed GONE by Distance Sensor ---");
-        
-        // --- NEW: Flash Orange 3 Times ---
-        for (int i = 0; i < 3; i++) {
-          setLED(255, 60, 0); // Orange mix (R:255, G:60, B:0)
-          delay(300);
-          setLED(0, 0, 0);    // Off
-          delay(300);
-        }
-      } else {
-        Serial.println("Timeout: No motion for 5 mins ---");
-      }
+      Serial.println(">>> USER LEFT: RESETTING SESSION <<<");
     }
-    
-    studyStartTime = 0; 
-    departureCounter = 0; 
-    setLED(0, 0, 0); 
+    studyStartTime = 0;
+    setLED(0, 0, 0);
     digitalWrite(BUZZER, LOW);
   }
-  
-  delay(100); 
-}
 
-// --- Logic & Hardware Functions ---
-
-void handlePostureAlert() {
-  setLED(255, 0, 0); 
-  moveServoSmooth(120); 
-  digitalWrite(BUZZER, HIGH); delay(100); digitalWrite(BUZZER, LOW);
+  printDebug(distUpper, distLower, pirMotion);
   delay(100);
-  digitalWrite(BUZZER, HIGH); delay(100); digitalWrite(BUZZER, LOW);
-  delay(1000); 
-  moveServoSmooth(90); 
 }
 
+// Fixed Environment Logic with Sound
 void handleEnvironmentLogic() {
   int lightLevel = analogRead(LDR_PIN);
-  if (lightLevel < LIGHT_THRESHOLD) setLED(255, 255, 255); 
-  else setLED(0, 255, 0); 
+  if (lightLevel < LIGHT_THRESHOLD) {
+    setLED(255, 255, 255); // White light
+    // Environment chirp: Short and low frequency
+    digitalWrite(BUZZER, HIGH);
+    delay(20); 
+    digitalWrite(BUZZER, LOW);
+  } else {
+    setLED(0, 255, 0); // Green: Good posture & Good light
+    digitalWrite(BUZZER, LOW);
+  }
 }
+// Helper to get distance from a specific sensor
+long getDistance(int trig, int echo) {
+  digitalWrite(trig, LOW); delayMicroseconds(2);
+  digitalWrite(trig, HIGH); delayMicroseconds(10);
+  digitalWrite(trig, LOW);
+  long dur = pulseIn(echo, HIGH, 25000);
+  return (dur > 0) ? (dur * 0.034 / 2) : -1;
+}
+
+void printDebug(long d1, long d2, bool pir) {
+  unsigned long elapsed = (studyStartTime == 0) ? 0 : (millis() - studyStartTime) / 1000;
+  Serial.print("PIR: "); Serial.print(pir);
+  Serial.print(" | UP: "); Serial.print(d1);
+  Serial.print(" | LOW: "); Serial.print(d2);
+  Serial.print(" | SESS: "); Serial.print(elapsed);
+  Serial.print(" | DEP_CNT: "); Serial.println(departureCounter);
+}
+
+// [Include handlePostureAlert, handleEnvironmentLogic, handleBreakAlert, setLED from previous versions]
+void handlePostureAlert() {
+  setLED(255, 0, 0); 
+  headServo.write(110); delay(200);
+  digitalWrite(BUZZER, HIGH); delay(100); digitalWrite(BUZZER, LOW);
+  headServo.write(90);
+}
+
 
 void handleBreakAlert() {
   setLED(0, 0, 255);
   digitalWrite(BUZZER, HIGH);
-  for(int i=0; i<3; i++) {
-    moveServoSmooth(110);
-    moveServoSmooth(70);
+  for(int i=0; i<2; i++) {
+    headServo.write(110); delay(300);
+    headServo.write(70);  delay(300);
   }
   digitalWrite(BUZZER, LOW);
-  moveServoSmooth(90);
+  headServo.write(90);
   studyStartTime = millis(); 
-}
-
-long getAveragedDistance() {
-  long sum = 0;
-  int validSamples = 0;
-  for(int i = 0; i < 5; i++) {
-    digitalWrite(TRIG_PIN, LOW); delayMicroseconds(2);
-    digitalWrite(TRIG_PIN, HIGH); delayMicroseconds(10);
-    digitalWrite(TRIG_PIN, LOW);
-    long duration = pulseIn(ECHO_PIN, HIGH, 30000); 
-    if (duration > 0) {
-      sum += duration * 0.034 / 2;
-      validSamples++;
-    }
-    delay(10);
-  }
-  return (validSamples > 0) ? (sum / validSamples) : -1;
-}
-
-void moveServoSmooth(int targetAngle) {
-  int currentAngle = headServo.read();
-  int step = (currentAngle < targetAngle) ? 1 : -1;
-  while(currentAngle != targetAngle){
-    currentAngle += step;
-    headServo.write(currentAngle);
-    delay(15);
-  }
 }
 
 void setLED(int r, int g, int b) {
   analogWrite(RED_LED, r);
   analogWrite(GREEN_LED, g);
   analogWrite(BLUE_LED, b);
-}
-
-void debugToSerial(long dist, bool pir) {
-  unsigned long elapsed = (millis() - studyStartTime) / 1000;
-  
-  Serial.print("Dist: "); 
-  Serial.print(dist);
-  Serial.print("cm | Session: "); 
-  Serial.print(elapsed);
-  Serial.print("s | Absence Count: "); 
-  Serial.print(departureCounter); 
-  Serial.print(" | PIR_RAW: "); 
-  Serial.println(pir ? "1 (MOV)" : "0 (---)"); 
 }
